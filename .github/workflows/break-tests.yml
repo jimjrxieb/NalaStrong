@@ -1,0 +1,25 @@
+# CBBP BREAK gate: the payout and sign-in misuse tests run on every pull request.
+# A failing test blocks merge once this check is marked required in branch protection.
+# Third-party actions are pinned to full commit SHAs (tags can be repointed).
+name: break-tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Python version
+        run: python3 --version
+      - name: Run BREAK suite
+        run: python3 -m unittest discover -s tests -v
