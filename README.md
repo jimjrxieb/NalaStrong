@@ -42,7 +42,7 @@ The suite covers the payout workflow's misuse cases: role checks, skipped approv
 | `dependency-scan` | Trivy filesystem scan (vulnerabilities, secrets, misconfigurations) | CRITICAL |
 | `workflow-scan` | zizmor | HIGH |
 
-Lower-severity findings appear in each job summary. Reports are kept as 90-day workflow artifacts. Scanner versions are pinned in the workflow's `env` block, and downloaded binaries are checked against SHA-256 checksums. To make the checks mandatory, mark `break-tests`, `secrets-scan`, `sast-scan`, `dependency-scan`, and `workflow-scan` as required status checks in `main` branch protection.
+Lower-severity findings appear in each job summary. Reports are kept as 90-day workflow artifacts. Scanner versions are pinned in the workflow's `env` block, and downloaded binaries are checked against SHA-256 checksums. To make the checks mandatory, mark `test` (from `break-tests.yml`), `secrets-scan`, `sast-scan`, `dependency-scan`, and `workflow-scan` as required status checks in `main` branch protection.
 
 Open http://127.0.0.1:8000/ for the public pages and http://127.0.0.1:8000/staff for staff sign-in. Use synthetic data. Program staff submit a request, an approver reviews it, finance records a sample external payment reference, and a reviewer reconciles it. SQLite stores the records and audit events under the ignored `.local/` directory.
 
