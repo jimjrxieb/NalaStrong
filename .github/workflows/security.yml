@@ -1,0 +1,166 @@
+# CBBP BUILD gate (GP-CONSULTING playbook 06-add-ci-pipeline): SA-10 / SA-11 evidence.
+# Runs on every PR, push to main, and nightly so CVEs disclosed after the last change still surface.
+# Blocks: any secret (gitleaks), Semgrep ERROR, Bandit HIGH, CRITICAL vuln/secret/misconfig (Trivy),
+#         HIGH workflow findings (zizmor). Everything else is reported in the job summary and artifacts.
+# Supply chain: actions pinned to commit SHAs; scanner binaries pinned and SHA-256 verified;
+# Python scanners pinned to exact versions. Bump versions and checksums together.
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  TRIVY_VERSION: "0.76.2"
+  TRIVY_SHA256: "bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"
+  SEMGREP_VERSION: "1.184.0"
+  BANDIT_VERSION: "1.9.4"
+  ZIZMOR_VERSION: "1.32.0"
+
+jobs:
+  secrets-scan:
+    name: secrets-scan (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history: a secret "deleted" in a later commit is still a leak
+          persist-credentials: false
+      - name: Install gitleaks (checksum verified)
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfLo gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Scan full git history
+        run: |
+          mkdir -p reports
+          gitleaks git --redact --no-banner --exit-code 1 \
+            --report-format json --report-path reports/gitleaks.json .
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: SA-11-gitleaks
+          path: reports/
+          retention-days: 90
+
+  sast-scan:
+    name: sast-scan (semgrep + bandit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned scanners
+        run: |
+          python3 -m venv "$RUNNER_TEMP/scan"
+          "$RUNNER_TEMP/scan/bin/pip" install --quiet "semgrep==${SEMGREP_VERSION}" "bandit==${BANDIT_VERSION}"
+          echo "$RUNNER_TEMP/scan/bin" >> "$GITHUB_PATH"
+      - name: Semgrep (blocks on ERROR)
+        env:
+          SEMGREP_SEND_METRICS: "off"
+        run: |
+          mkdir -p reports
+          semgrep scan --quiet --json -o reports/semgrep.json \
+            --config p/python --config p/secrets --config p/javascript --config p/github-actions .
+          python3 - <<'EOF'
+          import json, os, sys
+          results = json.load(open("reports/semgrep.json"))["results"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"### Semgrep: {len(results)} finding(s)\n")
+              for r in results:
+                  summary.write(f"- {r['extra']['severity']} `{r['check_id']}` {r['path']}:{r['start']['line']}\n")
+          blocking = [r for r in results if r["extra"]["severity"] == "ERROR"]
+          for r in blocking:
+              print(f"::error file={r['path']},line={r['start']['line']}::{r['check_id']}")
+          sys.exit(1 if blocking else 0)
+          EOF
+      - name: Bandit (blocks on HIGH severity)
+        if: always()
+        run: |
+          mkdir -p reports
+          bandit -r app.py tests -f json -o reports/bandit.json -q || true
+          python3 - <<'EOF'
+          import json, os, sys
+          results = json.load(open("reports/bandit.json"))["results"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"### Bandit: {len(results)} finding(s)\n")
+              for r in results:
+                  summary.write(f"- {r['issue_severity']} {r['test_id']} {r['filename']}:{r['line_number']} {r['issue_text']}\n")
+          blocking = [r for r in results if r["issue_severity"] == "HIGH"]
+          for r in blocking:
+              print(f"::error file={r['filename']},line={r['line_number']}::{r['test_id']} {r['issue_text']}")
+          sys.exit(1 if blocking else 0)
+          EOF
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: SA-11-sast
+          path: reports/
+          retention-days: 90
+
+  dependency-scan:
+    name: dependency-scan (trivy fs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install trivy (checksum verified)
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfLo trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tgz" | sha256sum -c -
+          tar -xzf trivy.tgz trivy
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Full report (all severities)
+        run: |
+          mkdir -p reports
+          trivy fs --quiet --scanners vuln,secret,misconfig --format json -o reports/trivy.json .
+          trivy fs --quiet --skip-db-update --scanners vuln,secret,misconfig --format table . >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Gate (blocks on CRITICAL)
+        run: |
+          trivy fs --quiet --skip-db-update --scanners vuln,secret,misconfig \
+            --severity CRITICAL --exit-code 1 .
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: RA-5-trivy
+          path: reports/
+          retention-days: 90
+
+  workflow-scan:
+    name: workflow-scan (zizmor)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install zizmor
+        run: |
+          python3 -m venv "$RUNNER_TEMP/scan"
+          "$RUNNER_TEMP/scan/bin/pip" install --quiet "zizmor==${ZIZMOR_VERSION}"
+      - name: Audit workflows (blocks on HIGH)
+        run: |
+          "$RUNNER_TEMP/scan/bin/zizmor" --offline --min-severity high .github/workflows/

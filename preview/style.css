@@ -47,3 +47,31 @@ input, button { font: inherit; border: 1px solid #557467; border-radius: .35rem;
 button { color: white; background: #224d3e; cursor: pointer; }
 :focus-visible { outline: 3px solid #805026; outline-offset: 3px; }
 article + article { margin-top: 1rem; }
+
+.mission { max-width: 52rem; }
+.story-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  align-items: start;
+  gap: clamp(1.25rem, 5vw, 4rem);
+  border-top: 1px solid #ccdcd0;
+}
+.photo-space {
+  display: grid;
+  place-items: center;
+  min-height: 15rem;
+  padding: 1rem;
+  text-align: center;
+  background: #dceadf;
+  border: 1px dashed #557467;
+  border-radius: .6rem;
+}
+@media (max-width: 42rem) {
+  .story-grid { grid-template-columns: 1fr; }
+}
+
+.photo-space { min-width: 0; gap: 1rem; }
+.photo-space input { max-width: 100%; }
+.story-photos { width: 100%; }
+.story-photos figure { margin: 0 0 1rem; }
+.story-photos img { display: block; width: 100%; height: auto; border-radius: .45rem; margin-bottom: .5rem; }

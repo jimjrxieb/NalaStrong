@@ -33,6 +33,7 @@ PUBLIC = {
     "/index.html": ("index.html", "text/html"),
     "/story.html": ("story.html", "text/html"),
     "/style.css": ("style.css", "text/css"),
+    "/story-photos.js": ("story-photos.js", "text/javascript"),
 }
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS staff (
@@ -174,19 +175,19 @@ def dashboard(db, user):
 
 def create_app(path):
     def app(env, start):
-        def respond(status, body="", *, location=None, cookie=None, kind="text/html"):
+        def respond(status, body="", *, location=None, cookie=None, kind="text/html", preview=False):
             headers = [
-                ("Content-Type", kind + "; charset=utf-8"),
+                ("Content-Type", kind if kind.startswith("image/") else kind + "; charset=utf-8"),
                 ("X-Content-Type-Options", "nosniff"),
                 ("Cache-Control", "no-store"),
-                ("Content-Security-Policy", "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
+                ("Content-Security-Policy", ("script-src 'self'; img-src 'self' blob:; " if preview else "") + "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
             ]
             if location:
                 headers.append(("Location", location))
             if cookie:
                 headers.append(("Set-Cookie", cookie))
             start(status, headers)
-            return [body.encode()]
+            return [body if isinstance(body, bytes) else body.encode()]
 
         def redirect(location, cookie=None):
             return respond("303 See Other", location=location, cookie=cookie)
@@ -198,7 +199,14 @@ def create_app(path):
         method = env["REQUEST_METHOD"]
         if method == "GET" and route in PUBLIC:
             filename, kind = PUBLIC[route]
-            return respond("200 OK", (ROOT / "preview" / filename).read_text(), kind=kind)
+            return respond("200 OK", (ROOT / "preview" / filename).read_text(), kind=kind, preview=filename == "index.html")
+        photo_route = re.fullmatch(r"/family-photos/(nala-[1-9]\.jpg)", route)
+        if method == "GET" and photo_route:
+            # Local review only: family photos are gitignored and never part of a deployment.
+            photo = ROOT / "preview" / "family-photos" / photo_route.group(1)
+            if photo.is_file():
+                return respond("200 OK", photo.read_bytes(), kind="image/jpeg")
+            return respond("404 Not Found")
         payout_route = re.fullmatch(r"/staff/payouts/([1-9][0-9]{0,17})", route)
         if route not in {"/staff", "/staff/login", "/staff/logout", "/staff/payouts"} and not payout_route:
             return respond("404 Not Found")

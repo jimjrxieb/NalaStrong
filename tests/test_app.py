@@ -16,6 +16,7 @@ import unittest
 from contextlib import closing
 from http.cookies import SimpleCookie
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -48,7 +49,9 @@ class Client:
             captured["status"] = int(status.split()[0])
             captured["headers"] = headers
 
-        text = b"".join(self.wsgi(env, start)).decode()
+        raw = b"".join(self.wsgi(env, start))
+        captured["body"] = raw
+        text = raw.decode(errors="replace")
         for name, value in captured["headers"]:
             if name == "Set-Cookie":
                 captured["set_cookie"] = value
@@ -320,6 +323,130 @@ class MigrationTests(unittest.TestCase):
                 row = db.execute("SELECT mfa_secret, mfa_last_step FROM staff").fetchone()
             self.assertIsNone(row["mfa_secret"])
             self.assertEqual(row["mfa_last_step"], 0)
+
+
+# Synthetic stand-in bytes: real family photos are gitignored and never reach CI.
+FAKE_JPEG = b"\xff\xd8\xff\xe0synthetic-test-photo\xff\xd9"
+
+
+class FamilyPhotoRouteTests(unittest.TestCase):
+    """The local-review photo route must serve only nala-[1-9].jpg from preview/family-photos/."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        photos = root / "preview" / "family-photos"
+        photos.mkdir(parents=True)
+        (photos / "nala-1.jpg").write_bytes(FAKE_JPEG)
+        (photos / "nala-1.jpg.bak").write_bytes(b"backup")
+        (photos / "notes.txt").write_text("private")
+        (root / "preview" / "secret.txt").write_text("private")
+        (root / "app.py").write_text("private")
+        (photos / "nala-3.jpg").mkdir()  # a directory with a photo name is not a photo
+        patcher = mock.patch.object(app, "ROOT", root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.client = Client(app.create_app(root / "test.sqlite"))
+
+    def test_existing_photo_is_served_as_jpeg(self):
+        status, _, meta = self.client.get("/family-photos/nala-1.jpg")
+        self.assertEqual(status, 200)
+        self.assertEqual(meta["body"], FAKE_JPEG)
+        headers = dict(meta["headers"])
+        self.assertEqual(headers["Content-Type"], "image/jpeg")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertTrue(headers["Content-Security-Policy"].startswith("default-src 'none'"))
+
+    def test_missing_photo_is_not_found(self):
+        self.assertEqual(self.client.get("/family-photos/nala-2.jpg")[0], 404)
+
+    def test_directory_named_like_a_photo_is_not_found(self):
+        self.assertEqual(self.client.get("/family-photos/nala-3.jpg")[0], 404)
+
+    def test_names_outside_the_allowed_pattern_are_not_found(self):
+        for path in ("/family-photos/nala-0.jpg", "/family-photos/nala-10.jpg",
+                     "/family-photos/nala-1.jpg.bak", "/family-photos/NALA-1.JPG",
+                     "/family-photos/nala-1.jpeg", "/family-photos/nala-1.png",
+                     "/family-photos/nala-1.jpg/", "/family-photos/notes.txt",
+                     "/family-photos/", "/family-photos", "/preview/family-photos/nala-1.jpg"):
+            with self.subTest(path=path):
+                status, _, meta = self.client.get(path)
+                self.assertEqual(status, 404)
+                self.assertNotIn(b"private", meta["body"])
+
+    def test_path_traversal_is_not_found(self):
+        for path in ("/family-photos/../secret.txt", "/family-photos/../../app.py",
+                     "/family-photos/..%2fsecret.txt", "/family-photos/%2e%2e/secret.txt",
+                     "/family-photos/nala-1.jpg/../../secret.txt", "/family-photos//nala-1.jpg",
+                     "/family-photos/nala-1.jpg\x00.txt", "/family-photos/..\\secret.txt"):
+            with self.subTest(path=path):
+                status, _, meta = self.client.get(path)
+                self.assertEqual(status, 404)
+                self.assertNotIn(b"private", meta["body"])
+
+    def test_only_get_is_served(self):
+        for method in ("POST", "PUT", "DELETE", "HEAD"):
+            with self.subTest(method=method):
+                status, _, meta = self.client.request(method, "/family-photos/nala-1.jpg")
+                self.assertNotEqual(status, 200)
+                self.assertNotEqual(meta["body"], FAKE_JPEG)
+
+    def test_unexpected_host_cannot_fetch_photos(self):
+        self.assertEqual(self.client.get("/family-photos/nala-1.jpg", host="evil.example")[0], 400)
+        self.assertEqual(self.client.get("/family-photos/nala-1.jpg", host="nalastrong.org")[0], 400)
+
+    def test_family_photo_folder_is_gitignored(self):
+        ignore = (Path(__file__).resolve().parent.parent / ".gitignore").read_text().splitlines()
+        self.assertIn("/preview/family-photos/", ignore)
+
+
+class PreviewPolicyTests(unittest.TestCase):
+    """Only the homepage gets the script and image allowances that the photo preview needs."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        db_path = Path(self.tmp.name) / "test.sqlite"
+        with closing(app.connect(db_path)) as db, db:
+            app.init_db(db)
+        self.client = Client(app.create_app(db_path))
+
+    def policy(self, path):
+        status, _, meta = self.client.get(path)
+        self.assertEqual(status, 200, path)
+        return dict(meta["headers"])["Content-Security-Policy"]
+
+    def test_homepage_allows_same_origin_script_and_blob_images_only(self):
+        for path in ("/", "/index.html"):
+            with self.subTest(path=path):
+                policy = self.policy(path)
+                self.assertIn("script-src 'self';", policy)
+                self.assertIn("img-src 'self' blob:;", policy)
+                self.assertIn("default-src 'none'", policy)
+                self.assertIn("frame-ancestors 'none'", policy)
+                self.assertNotIn("unsafe-inline", policy)
+                self.assertNotIn("unsafe-eval", policy)
+                self.assertNotIn("*", policy)
+
+    def test_other_pages_keep_the_strict_policy(self):
+        for path in ("/story.html", "/style.css", "/story-photos.js", "/staff"):
+            with self.subTest(path=path):
+                policy = self.policy(path)
+                self.assertNotIn("script-src", policy)
+                self.assertNotIn("img-src", policy)
+                self.assertTrue(policy.startswith("default-src 'none'"))
+
+    def test_photo_script_is_served_as_javascript(self):
+        status, text, meta = self.client.get("/story-photos.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(dict(meta["headers"])["Content-Type"], "text/javascript; charset=utf-8")
+        self.assertIn("loadFamilyPhotos", text)
+
+    def test_photo_script_only_runs_on_local_hosts(self):
+        script = (Path(__file__).resolve().parent.parent / "preview" / "story-photos.js").read_text()
+        self.assertIn('["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)', script)
 
 
 if __name__ == "__main__":

@@ -4,3 +4,6 @@ __pycache__/
 *.sqlite
 *.sqlite-*
 .env
+
+# Family review photos stay local until approved for publication.
+/preview/family-photos/

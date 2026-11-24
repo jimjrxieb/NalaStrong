@@ -29,7 +29,20 @@ The session cookie is marked `Secure`. Chrome, Edge, and Firefox accept it on `h
 python3 -m unittest discover -s tests -v
 ```
 
-The suite covers the payout workflow's misuse cases: role checks, skipped approvals, self-approval, duplicate bank references, append-only audit history, CSRF, origin and host checks, session expiry and logout, MFA, code replay, and lockout. `.github/workflows/break-tests.yml` runs it on every pull request once this folder is the root of the NalaStrong repository.
+The suite covers the payout workflow's misuse cases: role checks, skipped approvals, self-approval, duplicate bank references, append-only audit history, CSRF, origin and host checks, session expiry and logout, MFA, code replay, and lockout. It also covers the local family-photo route: only `nala-[1-9].jpg` files are served, path traversal returns 404, and only the homepage gets the script and image allowances. `.github/workflows/break-tests.yml` runs it on every pull request once this folder is the root of the NalaStrong repository.
+
+## Security pipeline
+
+`.github/workflows/security.yml` runs on every pull request, every push to `main`, and nightly:
+
+| Check | Tool | Blocks the PR on |
+| --- | --- | --- |
+| `secrets-scan` | gitleaks, full git history | Any secret |
+| `sast-scan` | Semgrep (Python, JavaScript, secrets, Actions rules) and Bandit | Semgrep ERROR, Bandit HIGH |
+| `dependency-scan` | Trivy filesystem scan (vulnerabilities, secrets, misconfigurations) | CRITICAL |
+| `workflow-scan` | zizmor | HIGH |
+
+Lower-severity findings appear in each job summary. Reports are kept as 90-day workflow artifacts. Scanner versions are pinned in the workflow's `env` block, and downloaded binaries are checked against SHA-256 checksums. To make the checks mandatory, mark `break-tests`, `secrets-scan`, `sast-scan`, `dependency-scan`, and `workflow-scan` as required status checks in `main` branch protection.
 
 Open http://127.0.0.1:8000/ for the public pages and http://127.0.0.1:8000/staff for staff sign-in. Use synthetic data. Program staff submit a request, an approver reviews it, finance records a sample external payment reference, and a reviewer reconciles it. SQLite stores the records and audit events under the ignored `.local/` directory.
 
